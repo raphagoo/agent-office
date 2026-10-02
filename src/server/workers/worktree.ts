@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { WorkerInfo, WorkerRepo } from '../../shared/protocol.js';
-import { normalizeRepo } from '../../shared/floors.js';
+import { forgeOf, repoPath } from '../../shared/forge.js';
+import { originRepo } from '../forge/origin.js';
 import { officePrompt } from '../prompts.js';
 import { WORKSPACE_FILES, WORKTREES_DIR, Worktrees, describeWork, workspaceOf, type WorktreeCleanup, type WorktreeRef, type WorktreeState } from '../worktrees.js';
 import { midTurn } from './lifecycle.js';
@@ -50,14 +51,8 @@ export function validRepos(raw: unknown): WorkerRepo[] | undefined {
   return repos.length ? repos : undefined;
 }
 
-/** owner/name of a checkout's origin on GitHub, when it has one. */
-export function originRepo(dir: string): string | undefined {
-  try {
-    return normalizeRepo(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim());
-  } catch {
-    return undefined;
-  }
-}
+/** The repository a checkout's origin is, on GitHub (owner/name) or GitLab (host/group/…/project), when it has one. */
+export { originRepo };
 
 /** What starting a worker whose worktree was deleted (see WorkerInfo.lost) says instead. */
 export function lostMessage(info: WorkerInfo): string {
@@ -125,13 +120,20 @@ export class WorkerTrees {
    * workspace like `others`. Throws when it can't be written.
    */
   private writeBrief(primary: { path: string; branch: string; from?: string }, others: { name: string; project: string; from?: string }[]) {
-    const home = originRepo(this.ctx.dir) ?? path.basename(this.ctx.dir);
+    const origin = originRepo(this.ctx.dir);
+    // A GitLab project is named by its path there (group/project): that's what an issue is linked as (group/project#12).
+    const home = origin ? repoPath(origin) : path.basename(this.ctx.dir);
     const line = (name: string, project: string, from?: string, note = '') => `- \`${name}/\`: ${project}${from ? `, cut from ${from}` : ''}${note}`;
-    const brief = officePrompt(this.ctx.prompts, 'worker.repos', {
-      branch: primary.branch,
-      home,
-      repos: [line(path.basename(primary.path), home, primary.from, " (this floor's project)"), ...others.map((o) => line(o.name, o.project, o.from))].join('\n'),
-    });
+    const brief = officePrompt(
+      this.ctx.prompts,
+      'worker.repos',
+      {
+        branch: primary.branch,
+        home,
+        repos: [line(path.basename(primary.path), home, primary.from, " (this floor's project)"), ...others.map((o) => line(o.name, o.project, o.from))].join('\n'),
+      },
+      forgeOf(origin),
+    );
     for (const file of WORKSPACE_FILES) writeFileSync(path.join(this.ctx.dir, path.dirname(primary.path), file), `${brief.trim()}\n`);
   }
 

@@ -3,6 +3,7 @@ import type { Net } from '../../net';
 import { h, openModal } from '../dom';
 import { mergeWaiters } from './api';
 import { MERGE_KEY, mergePref, savePref } from './prefs';
+import { floorForge } from './forge';
 
 // ---- Whether a PR can merge ---------------------------------------------------------------------
 
@@ -14,7 +15,7 @@ interface MergeStatus {
   cls: 'ok' | 'warn' | 'bad' | 'muted';
   /** False when merging can't work at all (draft, conflicts, already merged). */
   can: boolean;
-  /** GitHub could merge it on its own once the requirements pass. */
+  /** The forge could merge it on its own once the requirements pass. */
   auto: boolean;
 }
 
@@ -28,7 +29,7 @@ export function mergeStatus(d: GhPullDetail): MergeStatus {
   const pending = d.checks.filter((c) => c.state === 'pending').length;
   if (d.state === 'MERGED') return { icon: '🎉', text: 'Merged.', cls: 'ok', can: false, auto: false };
   if (d.state === 'CLOSED') return { icon: '🗑️', text: 'Closed without merging.', cls: 'muted', can: false, auto: false };
-  if (d.isDraft) return { icon: '📝', text: 'This is still a draft. Mark it ready for review on GitHub before merging.', cls: 'muted', can: false, auto: false };
+  if (d.isDraft) return { icon: '📝', text: `This is still a draft. Mark it ready for review on ${floorForge().name} before merging.`, cls: 'muted', can: false, auto: false };
   if (conflicted(d))
     return { icon: '⚠️', text: `This branch has conflicts with ${d.baseRefName} that must be resolved first.`, cls: 'bad', can: false, auto: false };
   if (d.mergeStateStatus === 'BEHIND') return { icon: '⤵️', text: `The branch is behind ${d.baseRefName}, and this repo wants it up to date before merging.`, cls: 'warn', can: true, auto: true };
@@ -38,7 +39,7 @@ export function mergeStatus(d: GhPullDetail): MergeStatus {
   }
   if (failing) return { icon: '❌', text: `${failing} check${failing > 1 ? 's' : ''} failing. It can still be merged.`, cls: 'warn', can: true, auto: false };
   if (pending || d.mergeStateStatus === 'UNSTABLE') return { icon: '🟡', text: 'Checks are still running. It can be merged now, or once they pass.', cls: 'warn', can: true, auto: true };
-  if (d.mergeStateStatus === 'UNKNOWN' || d.mergeable === 'UNKNOWN') return { icon: '⏳', text: 'GitHub is still working out whether this can merge. Refresh in a moment.', cls: 'muted', can: true, auto: false };
+  if (d.mergeStateStatus === 'UNKNOWN' || d.mergeable === 'UNKNOWN') return { icon: '⏳', text: `${floorForge().name} is still working out whether this can merge. Refresh in a moment.`, cls: 'muted', can: true, auto: false };
   return { icon: '✅', text: `Ready to merge: no conflicts with ${d.baseRefName}${d.checks.length ? ' and all checks passed' : ''}.`, cls: 'ok', can: true, auto: false };
 }
 
@@ -101,7 +102,7 @@ export function openMerge(it: GhPull, d: GhPullDetail, net: Net, handToWorker: (
       h('label', { style: 'margin-top:14px' }, 'How'),
       methodBtns,
       h('label.gh-check', { for: 'merge-del' }, del, `Delete ${it.headRefName} after merging`),
-      st.auto ? h('label.gh-check', { for: 'merge-auto', title: 'gh pr merge --auto (the repo must allow auto-merge)' }, auto, 'Merge automatically once the requirements pass') : null,
+      st.auto ? h('label.gh-check', { for: 'merge-auto', title: 'Merge once its checks pass (the project must allow it)' }, auto, 'Merge automatically once the requirements pass') : null,
       result,
     ),
     h('footer', {}, st.can || conflicted(d) ? null : worker, h('span.grow'), cancel, conflicted(d) ? worker : go),
@@ -120,7 +121,7 @@ export function openMerge(it: GhPull, d: GhPullDetail, net: Net, handToWorker: (
     busy = true;
     go.disabled = true;
     result.className = 'gh-merge-result';
-    result.replaceChildren(h('span.spinner'), auto.checked && st.auto ? 'Asking GitHub to merge it when ready…' : 'Merging…');
+    result.replaceChildren(h('span.spinner'), auto.checked && st.auto ? `Asking ${floorForge().name} to merge it when ready…` : 'Merging…');
     mergeWaiters.set(it.number, (msg) => {
       mergeWaiters.delete(it.number);
       busy = false;

@@ -1,6 +1,7 @@
 // The building: every project is a floor you ride the elevator to. Shared by the server (which
 // assigns each floor its look) and the client (which paints it).
 
+import { parseRepo } from './forge.js';
 import type { CloneProgress } from './protocol.js';
 
 /** The most floors a building has. */
@@ -36,23 +37,13 @@ export function floorPalette(i: number): FloorPalette {
 }
 
 /**
- * `owner/repo` from what someone typed or pasted: owner/repo, a github.com URL (https, ssh or
- * git@), with or without .git. Undefined for anything else, so it can never become a CLI option,
- * a path or another host.
+ * A repository's name as the office keeps it, from what someone typed or pasted: `owner/name` for a
+ * GitHub repository (owner/name, or a github.com URL, https, ssh or git@), `host/group/…/project` for
+ * one on GitLab (see parseRepo). Undefined for anything else, so it can never become a CLI option, a
+ * path or another host.
  */
 export function normalizeRepo(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  let s = value.trim();
-  if (s.length > 200) return undefined;
-  s = s.replace(/^(?:https?:\/\/|ssh:\/\/)?(?:[\w.-]+@)?github\.com[/:]/i, '');
-  s = s.replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\.git$/i, '');
-  const parts = s.split('/');
-  // A URL may go on past the repository (…/owner/repo/issues/12).
-  if (parts.length < 2) return undefined;
-  const [owner, repo] = parts;
-  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(owner)) return undefined;
-  if (!/^[a-zA-Z0-9_.-]{1,100}$/.test(repo) || repo === '.' || repo === '..') return undefined;
-  return `${owner}/${repo}`;
+  return parseRepo(value)?.repo;
 }
 
 export function sameRepo(a: string | undefined, b: string | undefined): boolean {

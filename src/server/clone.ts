@@ -1,9 +1,11 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, fstatSync, openSync, readSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { FORGES, type ForgeKind } from '../shared/forge.js';
 import type { CloneProgress } from '../shared/protocol.js';
+import type { CloneCommand } from './forge/types.js';
 
-// One `gh repo clone`, run so the office can see how it's getting on. git's progress goes to a log
+// One `gh repo clone` (or `glab repo clone`), run so the office can see how it's getting on. git's progress goes to a log
 // file, which the office reads every second: that says how far along it is, and a log that stops
 // growing is a clone that's stuck. The clone runs in its own session with no terminal, so an ssh
 // host-key question or a password prompt fails it straight away instead of waiting, unseen, on the
@@ -17,45 +19,55 @@ export const STALL_MS = 3 * 60_000;
 const TAIL_BYTES = 16 * 1024;
 
 /** What git says it's doing, in words for the elevator. */
-const STEPS: Record<string, string> = {
-  'Enumerating objects': 'GitHub is packing it up',
-  'Counting objects': 'GitHub is packing it up',
-  'Compressing objects': 'GitHub is packing it up',
+const STEPS = (forge: ForgeKind): Record<string, string> => ({
+  'Enumerating objects': `${FORGES[forge].name} is packing it up`,
+  'Counting objects': `${FORGES[forge].name} is packing it up`,
+  'Compressing objects': `${FORGES[forge].name} is packing it up`,
   'Receiving objects': 'Downloading',
   'Resolving deltas': 'Unpacking',
   'Checking connectivity': 'Checking it over',
   'Updating files': 'Checking out files',
   'Filtering content': 'Downloading LFS files',
-};
+});
 
 const PROGRESS = /^(?:remote: )?([A-Z][a-z]+ [a-z]+):\s+(?:(\d{1,3})%(?: \(\d+\/\d+\))?|\d+)(?:, ([\d.]+ [KMGT]?i?B)(?: \| ([\d.]+ [KMGT]?i?B\/s))?)?/;
 
 /** How far a clone has got, from the latest progress line in git's output (lines end in \r or \n). */
-export function parseProgress(output: string): CloneProgress | undefined {
+export function parseProgress(output: string, forge: ForgeKind = 'github'): CloneProgress | undefined {
+  const steps = STEPS(forge);
   const lines = output.split(/[\r\n]+/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = PROGRESS.exec(lines[i].trim());
-    if (m && STEPS[m[1]]) {
+    if (m && steps[m[1]]) {
       const detail = [m[3], m[4]].filter(Boolean).join(' · ');
-      return { step: STEPS[m[1]], ...(m[2] ? { percent: Math.min(100, Number(m[2])) } : {}), ...(detail ? { detail } : {}) };
+      return { step: steps[m[1]], ...(m[2] ? { percent: Math.min(100, Number(m[2])) } : {}), ...(detail ? { detail } : {}) };
     }
-    if (/^Cloning into /.test(lines[i].trim())) return { step: 'Connecting to GitHub' };
+    if (/^Cloning into /.test(lines[i].trim())) return { step: `Connecting to ${FORGES[forge].name}` };
   }
   return undefined;
 }
 
-/** Why a clone failed, from what gh and git said, in terms of what to do about it on the office's machine. */
-export function whyCloneFailed(output: string): string {
+/**
+ * Why a clone failed, from what gh (or glab) and git said, in terms of what to do about it on the
+ * office's machine. `host` is where it was cloning from, for a GitLab that isn't gitlab.com.
+ */
+export function whyCloneFailed(output: string, forge: ForgeKind = 'github', host = forge === 'gitlab' ? 'gitlab.com' : 'github.com'): string {
   const said = output
     .split(/[\r\n]+/)
     .map((l) => l.trim())
     .filter((l) => l && !PROGRESS.test(l) && !/^Cloning into /.test(l));
   const all = said.join('\n');
-  if (/Host key verification failed/i.test(all)) return "ssh on the office's machine hasn't accepted github.com's host key yet. Run `ssh -T git@github.com` there once, or clone over https with `gh config set git_protocol https`";
-  if (/passphrase/i.test(all)) return "the office's ssh key needs its passphrase. Add it to the ssh agent (`ssh-add`), or clone over https with `gh config set git_protocol https`";
-  if (/Permission denied \(publickey/i.test(all)) return "GitHub didn't take the office's ssh key. Add it with `gh ssh-key add`, or clone over https with `gh config set git_protocol https`";
-  if (/terminal prompts disabled|could not read (Username|Password)|Authentication failed/i.test(all)) return "git wanted a GitHub password. Run `gh auth setup-git` on the office's machine so git uses gh's login";
-  return said.slice(-2).join(' ') || 'gh failed';
+  const { name, cli } = FORGES[forge];
+  const https = `clone over https with \`${cli} config set git_protocol https\``;
+  if (/Host key verification failed/i.test(all)) return `ssh on the office's machine hasn't accepted ${host}'s host key yet. Run \`ssh -T git@${host}\` there once, or ${https}`;
+  if (/passphrase/i.test(all)) return `the office's ssh key needs its passphrase. Add it to the ssh agent (\`ssh-add\`), or ${https}`;
+  if (/Permission denied \(publickey/i.test(all)) {
+    return forge === 'gitlab' ? `${name} didn't take the office's ssh key. Add it in ${host} (Preferences → SSH Keys), or ${https}` : `${name} didn't take the office's ssh key. Add it with \`gh ssh-key add\`, or ${https}`;
+  }
+  if (/terminal prompts disabled|could not read (Username|Password)|Authentication failed/i.test(all)) {
+    return forge === 'gitlab' ? `git wanted a GitLab password. Run \`glab auth login\` on the office's machine, then ${https}` : "git wanted a GitHub password. Run `gh auth setup-git` on the office's machine so git uses gh's login";
+  }
+  return said.slice(-2).join(' ') || `${cli} failed`;
 }
 
 /** How a clone ended: stopped (and why), or the process's exit code (null when an office before this one started it). */
@@ -67,6 +79,8 @@ export interface CloneEnd {
 }
 
 export interface CloneRunOptions {
+  /** Where it's cloning from, for wording what it says. */
+  forge?: ForgeKind;
   /** Hears about new progress, at most once a tick. */
   changed?: () => void;
   stallMs?: number;
@@ -96,8 +110,8 @@ export class CloneRun {
     this.timer = setInterval(() => this.tick(), opts.tickMs ?? 1000);
   }
 
-  /** Starts `gh repo clone repo dest`, writing to `log`. Resolves once it's running, or to why it couldn't start. */
-  static start(repo: string, dest: string, log: string, opts: CloneRunOptions = {}): Promise<CloneRun | string> {
+  /** Starts `command` (a `gh repo clone` or `glab repo clone` into `dest`), writing to `log`. Resolves once it's running, or to why it couldn't start. */
+  static start(command: CloneCommand, dest: string, log: string, opts: CloneRunOptions = {}): Promise<CloneRun | string> {
     let fd: number;
     try {
       fd = openSync(log, 'w', 0o600);
@@ -107,18 +121,19 @@ export class CloneRun {
     return new Promise((resolve) => {
       let child: ChildProcess;
       try {
-        child = spawn('gh', ['repo', 'clone', repo, dest, '--', '--progress'], {
+        child = spawn(command.cmd, command.args, {
           cwd: path.dirname(dest),
           detached: GROUPS,
           stdio: ['ignore', fd, fd],
           windowsHide: true,
           // No prompts: nobody would see them. What would have asked says so and fails instead.
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' },
+          env: { ...process.env, ...command.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', NO_PROMPT: '1' },
         });
       } finally {
         closeSync(fd);
       }
-      child.once('error', (err: NodeJS.ErrnoException) => resolve(err.code === 'ENOENT' ? "The GitHub CLI (gh) isn't installed on the office's machine" : `Couldn't run gh: ${err.message}`));
+      const forge = FORGES[opts.forge ?? 'github'];
+      child.once('error', (err: NodeJS.ErrnoException) => resolve(err.code === 'ENOENT' ? `The ${forge.name} CLI (${forge.cli}) isn't installed on the office's machine` : `Couldn't run ${forge.cli}: ${err.message}`));
       child.once('spawn', () => {
         const run = new CloneRun(child.pid!, log, child, opts);
         child.once('exit', (code) => run.end(code));
@@ -174,14 +189,14 @@ export class CloneRun {
     if (size !== this.size) {
       this.size = size;
       this.grewAt = Date.now();
-      const progress = parseProgress(text);
+      const progress = parseProgress(text, this.opts.forge);
       if (JSON.stringify(progress) !== JSON.stringify(this.progress)) {
         this.progress = progress;
         this.opts.changed?.();
       }
     } else if (Date.now() - this.grewAt > stallMs) {
       const mins = Math.max(1, Math.round(stallMs / 60_000));
-      this.stop(`Cloning stalled: nothing new from GitHub in ${mins} minute${mins === 1 ? '' : 's'}. Try again, or check the office machine's connection`);
+      this.stop(`Cloning stalled: nothing new from ${FORGES[this.opts.forge ?? 'github'].name} in ${mins} minute${mins === 1 ? '' : 's'}. Try again, or check the office machine's connection`);
     }
   }
 

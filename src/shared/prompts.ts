@@ -4,6 +4,8 @@
 // server/prompts.ts, for the whole building); these are the defaults, which "Default" goes back to.
 // A {{name}} in one is filled in by the office when it's sent.
 
+import { forgeText } from './forge-text.js';
+import type { ForgeKind } from './forge.js';
 import { STATION_AGENT, type StationKind } from './layout.js';
 
 export type PromptGroup = 'issues' | 'pulls' | 'queue' | 'repos' | 'stations' | 'meetings' | 'office';
@@ -394,11 +396,12 @@ const PLACEHOLDER = /\{\{\s*([A-Za-z]\w*)\s*\}\}/g;
 /**
  * Fills in a prompt's {{placeholders}}. A line that's nothing but a placeholder with nothing to say
  * goes, and so does the blank line after it. A name it doesn't know stays as it's written, and what
- * goes in is never looked at again, so an issue titled "{{title}}" stays that.
+ * goes in is never looked at again, so an issue titled "{{title}}" stays that. For a project on
+ * GitLab (`forge`) the template is put in GitLab's words and glab's commands first (see forgeText).
  */
-export function fillPrompt(template: string, vars: PromptVars): string {
+export function fillPrompt(template: string, vars: PromptVars, forge?: ForgeKind): string {
   const empty = (name: string) => Object.prototype.hasOwnProperty.call(vars, name) && !String(vars[name] ?? '').trim();
-  const lines = template.replace(/\r\n?/g, '\n').split('\n');
+  const lines = forgeText(template, forge).replace(/\r\n?/g, '\n').split('\n');
   const kept: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const only = /^\s*\{\{\s*([A-Za-z]\w*)\s*\}\}\s*$/.exec(lines[i]);

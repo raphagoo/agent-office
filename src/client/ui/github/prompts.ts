@@ -1,3 +1,4 @@
+import { forgeOfUrl } from '../../../shared/forge';
 import type { AgentEffort, AgentProvider, GhIssue, GhMergeMethod, GhPull } from '../../../shared/protocol';
 import { store } from '../../state';
 import { repoUrlOf } from '../markdown';
@@ -36,17 +37,20 @@ function nameWithOwner(url: string): string {
   return repoUrlOf(url).replace(/^https?:\/\/[^/]+\//, '');
 }
 
-/** What a pull request's prompts fill in. */
+/** What a pull request's prompts fill in. `project` is its repository's path, as a GitLab address has it (group%2Fproject). */
 export function pullVars(it: GhPull) {
-  return { number: it.number, title: it.title, url: it.url, branch: it.headRefName, base: it.baseRefName };
+  return { number: it.number, title: it.title, url: it.url, branch: it.headRefName, base: it.baseRefName, project: encodeURIComponent(nameWithOwner(it.url)) };
 }
 
 export function reviewPrompt(it: GhPull) {
   return officePrompt('pull.review', pullVars(it));
 }
 
+/** The command that merges it, for the forge it's on: gh pr merge, or glab mr merge (which merges unless told to squash or rebase, and asks before it does). */
 function mergeCommand(it: GhPull, method: GhMergeMethod, deleteBranch: boolean) {
-  return `gh pr merge ${it.number} --${method}${deleteBranch ? ' --delete-branch' : ''} --repo ${nameWithOwner(it.url)}`;
+  const repo = nameWithOwner(it.url);
+  if (forgeOfUrl(it.url) === 'gitlab') return `glab mr merge ${it.number}${method === 'merge' ? '' : ` --${method}`}${deleteBranch ? ' --remove-source-branch' : ''} --yes --repo ${repo}`;
+  return `gh pr merge ${it.number} --${method}${deleteBranch ? ' --delete-branch' : ''} --repo ${repo}`;
 }
 
 function mergeVars(it: GhPull, method: GhMergeMethod, deleteBranch: boolean) {

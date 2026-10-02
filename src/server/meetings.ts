@@ -10,6 +10,7 @@ import { validateWorkerEffort, validateWorkerModel } from './agents.js';
 import { providerMeta, takesEffort, takesModel } from '../shared/providers.js';
 import { gitError, type WorktreeRef, type WorktreeState } from './worktrees.js';
 import { PROMPTS, fillPrompt, type PromptId, type PromptVars } from '../shared/prompts.js';
+import { projectForge, projectText } from './forge/index.js';
 
 const execFileP = promisify(execFile);
 
@@ -115,8 +116,7 @@ export class MeetingRoom {
     return { current: this.current && { ...this.current, seats: this.current.seats.map((s) => ({ ...s })), turns: this.current.turns.map((t) => ({ ...t })) }, past: this.past.slice() };
   }
 
-  /** Calls a meeting. Returns why it couldn't, or undefined once everyone is sitting down. */
-  /** `owner` is the account calling it: the workers run on its sign-ins, and a review panel's review is posted as it. */
+  /** Calls a meeting. Returns why it couldn't, or undefined once everyone is sitting down. `owner` is the account calling it: the workers run on its sign-ins, and a review panel's review is posted as it. */
   start(req: MeetingRequest, by: string, owner?: string): string | undefined {
     if (this.current?.status === 'running') return `The meeting room is busy with “${this.current.title}”: stop that meeting first`;
     if (!isMeetingPattern(req.pattern)) return 'Unknown meeting pattern';
@@ -531,10 +531,10 @@ export class MeetingRoom {
       role,
       pattern: p.label,
       others: list(others),
-      how: how[m.pattern],
+      how: projectText(this.dir, how[m.pattern]),
       about: m.prompt,
-      pullRequest: m.pr !== undefined ? `The pull request is #${m.pr}: read it with gh pr view ${m.pr} and gh pr diff ${m.pr}.` : '',
-      issue: m.issue !== undefined ? `It comes from GitHub issue #${m.issue}: gh issue view ${m.issue} --comments.` : '',
+      pullRequest: m.pr !== undefined ? projectText(this.dir, `The pull request is #${m.pr}: read it with gh pr view ${m.pr} and gh pr diff ${m.pr}.`) : '',
+      issue: m.issue !== undefined ? projectText(this.dir, `It comes from GitHub issue #${m.issue}: gh issue view ${m.issue} --comments.`) : '',
       cwd: this.cwd(m),
       notes: path.join(this.cwd(m), m.notes),
       output: m.output,
@@ -546,7 +546,7 @@ export class MeetingRoom {
 
   /** One of the office's prompts, filled in. */
   private say(id: PromptId, vars: PromptVars = {}): string {
-    return fillPrompt(this.events.prompt?.(id) ?? PROMPTS[id].text, vars);
+    return fillPrompt(this.events.prompt?.(id) ?? PROMPTS[id].text, vars, projectForge(this.dir));
   }
 
   /** A part, as the prompt that hands it over. */

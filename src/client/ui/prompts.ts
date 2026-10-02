@@ -1,12 +1,14 @@
 import './prompts.css';
 import type { Net } from '../net';
 import { store } from '../state';
+import { forgeOf } from '../../shared/forge';
 import { PROMPTS, PROMPT_GROUPS, PROMPT_IDS, PROMPT_MAX, fillPrompt, placeholders, promptText, type PromptGroup, type PromptId, type PromptVars } from '../../shared/prompts';
 import { h, openModal, timeAgo } from './dom';
 
 /** One of the office's prompts, as it has it now (rewritten in ⚙️ Settings, or the default), filled in. */
 export function officePrompt(id: PromptId, vars: PromptVars = {}): string {
-  return fillPrompt(promptText(store.prompts.custom, id), vars);
+  // In GitLab's words and glab's commands when the floor you're on is a GitLab project.
+  return fillPrompt(promptText(store.prompts.custom, id), vars, forgeOf(store.currentFloor()?.repo));
 }
 
 /** How many of the office's prompts someone rewrote. */

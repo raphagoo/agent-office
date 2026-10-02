@@ -1,6 +1,7 @@
 // Workers at their desks and the board agents at their kiosks: hiring them, their terminals, their
 // worktrees and pull requests.
 import { MAX_REPOS, type RepoSource } from '../../workers.js';
+import { FORGES } from '../../../shared/forge.js';
 import { OPEN_CODE_MODEL_MAX } from '../../../shared/providers.js';
 import { isAgentEffort, isAgentProvider, type WorkerClientMsg } from '../../../shared/protocol.js';
 import { issueNumber, num, str } from '../../office/input.js';
@@ -142,12 +143,12 @@ export const workerHandlers = {
     const w = workerOf(ctx, msg.workerId);
     if (!w) return;
     const { floor, wid } = w;
-    ctx.withGitHub(c, (as) => void floor.workers.openPr(wid, who, as).then((r) => {
+    ctx.withForge(c, floor.github.kind, (as) => void floor.workers.openPr(wid, who, as).then((r) => {
       if (typeof r === 'string') return ctx.warn(c, r);
       const info = floor.workers.get(wid);
       const name = info?.name ?? 'the worker';
       const [one] = r.prs;
-      if (r.prs.length === 1 && !one.repo) ctx.toastFloor(floor, one.existed ? `${name}'s branch already has PR #${one.number}` : `${who} opened PR #${one.number} for ${name}`);
+      if (r.prs.length === 1 && !one.repo) ctx.toastFloor(floor, one.existed ? `${name}'s branch already has ${FORGES[floor.github.kind].pr} #${one.number}` : `${who} opened ${FORGES[floor.github.kind].pr} #${one.number} for ${name}`);
       else {
         // Across repositories: one line for them all.
         const list = r.prs.map((p) => `${p.repo} #${p.number}`).join(', ');

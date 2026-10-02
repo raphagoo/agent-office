@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { setGitlabHosts } from '../shared/forge.js';
 import { WEATHERS, type Weather } from '../shared/protocol.js';
 import { AGENT_PROVIDERS, PROVIDER_META } from '../shared/providers.js';
 import { MAX_WORKER_LIMIT, parseWorkerLimit } from './machine.js';
@@ -216,6 +217,8 @@ export function excludeFromGit(dir: string, entry = '.agent-office/') {
 }
 
 export function loadConfig(argv: string[]): Config {
+  // A self-managed GitLab (git.example.com) is a GitLab to the office once it's named here; gitlab.com and gitlab.* always are.
+  setGitlabHosts((process.env.AGENT_OFFICE_GITLAB_HOSTS ?? '').split(/[\s,]+/).filter(Boolean));
   let project = '';
   let home = officeHome();
   let homeGiven = !!process.env.AGENT_OFFICE_HOME;

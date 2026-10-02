@@ -3,8 +3,13 @@
 import { childEnv } from '../../workers.js';
 import type { ChangesClientMsg } from '../../../shared/protocol.js';
 import { repoOf, str } from '../../office/input.js';
+import type { Floor } from '../../floor.js';
+import type { Ctx } from '../../office/context.js';
 import { workerOf } from './common.js';
 import type { FeatureHooks, HandlerMap } from './types.js';
+
+/** Which forge the checkout a worker is changing is on: its own floor's project, or another floor's that it works in too. */
+const kindOf = (ctx: Ctx, floor: Floor, repo: string | undefined) => (repo ? ctx.floors.get(repo)?.github.kind : undefined) ?? floor.github.kind;
 
 export const changesHandlers = {
   'changes.watch'(ctx, c, msg) {
@@ -33,8 +38,8 @@ export const changesHandlers = {
   'changes.commit'(ctx, c, msg) {
     const who = c.peer.name;
     const w = workerOf(ctx, msg.workerId);
-    // Committed as whoever pressed it: their GitHub name and email, once they've signed in to it.
-    const env = c.accountId ? ctx.signins.apply(c.accountId, childEnv(), [], 'github') : undefined;
+    // Committed as whoever pressed it: their GitHub or GitLab name and email, once they've signed in to it.
+    const env = c.accountId && w ? ctx.signins.apply(c.accountId, childEnv(), [], kindOf(ctx, w.floor, repoOf(msg.repo))) : undefined;
     if (w) void w.floor.changes.commit(w.wid, str(msg.message, 5000), who, env, repoOf(msg.repo)).then((err) => ctx.warn(c, err));
   },
   'changes.discard'(ctx, c, msg) {
@@ -45,7 +50,7 @@ export const changesHandlers = {
   'changes.pr'(ctx, c, msg) {
     const who = c.peer.name;
     const w = workerOf(ctx, msg.workerId);
-    if (w) ctx.withGitHub(c, (as) => void w.floor.changes.pullRequest(w.wid, str(msg.title, 300), str(msg.body, 20000), who, as?.env, repoOf(msg.repo)).then((err) => ctx.warn(c, err)));
+    if (w) ctx.withForge(c, kindOf(ctx, w.floor, repoOf(msg.repo)), (as) => void w.floor.changes.pullRequest(w.wid, str(msg.title, 300), str(msg.body, 20000), who, as?.env, repoOf(msg.repo)).then((err) => ctx.warn(c, err)));
   },
 } satisfies HandlerMap<ChangesClientMsg>;
 

@@ -1,4 +1,5 @@
 import './ui.css';
+import { FORGES, forgeOfUrl, forgePage } from '../../../shared/forge';
 import { isDocPath, resolveDocLink, type DocFile, type DocList, type DocText } from '../../../shared/docs';
 import { clip, h, openModal, setDoing, timeAgo, toast } from '../../ui/dom';
 import { markdownFile } from '../../ui/markdown';
@@ -289,7 +290,7 @@ export function openBookshelf(deps: ShelfDeps) {
         a.dataset.doc = to.path;
         a.dataset.hash = to.hash;
       } else if (repoUrl) {
-        a.href = `${repoUrl}/blob/HEAD/${to.path.split('/').map(encodeURIComponent).join('/')}${to.hash ? `#${to.hash}` : ''}`;
+        a.href = `${forgePage(repoUrl, 'blob', `HEAD/${to.path.split('/').map(encodeURIComponent).join('/')}`)}${to.hash ? `#${to.hash}` : ''}`;
       } else {
         a.removeAttribute('href');
         a.title = to.path;
@@ -328,7 +329,7 @@ export function openBookshelf(deps: ShelfDeps) {
     const words = doc.text.split(/\s+/).filter(Boolean).length;
     meta.replaceChildren(
       [`${Math.max(1, Math.round(words / 220))} min read`, info ? size(info.size) : '', info ? `updated ${timeAgo(info.mtime)}` : ''].filter(Boolean).join(' · '),
-      repoUrl ? h('a', { href: `${repoUrl}/blob/HEAD/${path.split('/').map(encodeURIComponent).join('/')}`, target: '_blank', rel: 'noopener noreferrer', title: 'Open it on GitHub' }, 'GitHub ↗') : '',
+      repoUrl ? h('a', { href: forgePage(repoUrl, 'blob', `HEAD/${path.split('/').map(encodeURIComponent).join('/')}`), target: '_blank', rel: 'noopener noreferrer', title: `Open it on ${FORGES[forgeOfUrl(repoUrl)].name}` }, `${FORGES[forgeOfUrl(repoUrl)].name} ↗`) : '',
     );
     turnedAt = 0;
     jump(hash);

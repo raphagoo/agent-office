@@ -1,6 +1,7 @@
 import './markdown.css';
 import { Marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { forgePage, repoWebOfItem } from '../../shared/forge';
 import { h } from './dom';
 
 // GitHub-flavored markdown for issue and PR text: rendered by marked, then sanitized by DOMPurify
@@ -61,7 +62,7 @@ function linkify(root: HTMLElement, repoUrl?: string) {
     let at = 0;
     for (let m = REF_RE.exec(s); m; m = REF_RE.exec(s)) {
       const start = m.index + m[1].length;
-      const href = m[3] ? (repoUrl ? `${repoUrl}/issues/${m[3]}` : '') : `https://github.com/${m[4]}`;
+      const href = m[3] ? (repoUrl ? forgePage(repoUrl, 'issue', m[3]) : '') : `${repoUrl ? new URL(repoUrl).origin : 'https://github.com'}/${m[4]}`;
       if (!href) continue;
       frag.append(s.slice(at, start), h('a', { href, target: '_blank', rel: 'noopener noreferrer', class: m[3] ? 'ref' : 'mention' }, m[2]));
       at = start + m[2].length;
@@ -73,13 +74,13 @@ function linkify(root: HTMLElement, repoUrl?: string) {
 
 const SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 
-/** Relative links in a PR body mean GitHub pages: #anchors on the PR, paths in the repo. */
+/** Relative links in a PR body mean the forge's pages: #anchors on the PR, paths in the repo. */
 function absolutize(root: HTMLElement, itemUrl: string, repoUrl: string) {
   const fix = (v: string, anchors: boolean) => {
     if (!v || SCHEME_RE.test(v) || v.startsWith('//')) return v;
     if (v.startsWith('#')) return anchors ? `${itemUrl.split('#')[0]}${v}` : v;
-    if (v.startsWith('/')) return `https://github.com${v}`;
-    return `${repoUrl}/blob/HEAD/${v.replace(/^\.\//, '')}`;
+    if (v.startsWith('/')) return `${new URL(repoUrl).origin}${v}`;
+    return forgePage(repoUrl, 'blob', `HEAD/${v.replace(/^\.\//, '')}`);
   };
   for (const a of root.querySelectorAll('a[href]')) a.setAttribute('href', fix(a.getAttribute('href') ?? '', true));
   for (const img of root.querySelectorAll('img[src]')) img.setAttribute('src', fix(img.getAttribute('src') ?? '', false));
@@ -117,7 +118,7 @@ export function markdownFile(src: string): HTMLElement {
   return el;
 }
 
-/** https://github.com/owner/repo from an issue or PR URL. */
+/** The project's web address (https://github.com/owner/repo) from an issue or PR URL. */
 export function repoUrlOf(itemUrl: string): string {
-  return itemUrl.replace(/\/(pull|issues)\/\d+.*$/, '');
+  return repoWebOfItem(itemUrl);
 }

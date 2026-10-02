@@ -1,8 +1,8 @@
 import type http from 'node:http';
 import { notLeaving } from '../leave-on-merge.js';
 import { findWorker, readHireRequest, readHomeRequest, readPrRequest, workerRow, type PullsView } from '../office-workers.js';
-import { gh } from '../github.js';
 import type { Floor } from '../floor.js';
+import { FORGES } from '../../shared/forge.js';
 import { nextFreeSeat } from '../../shared/layout.js';
 import type { WorkerInfo } from '../../shared/protocol.js';
 import type { Ctx } from '../office/context.js';
@@ -20,7 +20,7 @@ async function pullOf(floor: Floor, n: number, repo?: string): Promise<{ number:
   let pr: { url: string; state: string } | undefined = listed;
   if (!pr) {
     try {
-      pr = JSON.parse(await gh(['pr', 'view', String(n), '--json', 'url,state'], floor.dir)) as { url: string; state: string };
+      pr = await floor.github.forge.pullSummary(n);
     } catch (err) {
       return `No pull request #${n} here: ${(err as Error).message}`;
     }
@@ -160,9 +160,9 @@ export async function officeWorkers(ctx: Ctx, req: http.IncomingMessage, res: ht
   if (ask.issue) {
     const n = ask.issue;
     floor.queue.dropIssue(n);
-    const as = owner ? ctx.signins.ghAs(owner) : undefined;
-    if (typeof as === 'string') ctx.toastFloor(floor, `Couldn't assign issue #${n} on GitHub: ${as}`, 'warn');
-    else void floor.github.claim(n, as).then((e) => e && ctx.toastFloor(floor, `Couldn't assign issue #${n} on GitHub: ${e}`, 'warn'));
+    const as = owner ? ctx.signins.ghAs(owner, floor.github.kind) : undefined;
+    if (typeof as === 'string') ctx.toastFloor(floor, `Couldn't assign issue #${n} on ${FORGES[floor.github.kind].name}: ${as}`, 'warn');
+    else void floor.github.claim(n, as).then((e) => e && ctx.toastFloor(floor, `Couldn't assign issue #${n} on ${FORGES[floor.github.kind].name}: ${e}`, 'warn'));
   }
   send(res, 200, { ok: true, worker: row(r.id) });
 }

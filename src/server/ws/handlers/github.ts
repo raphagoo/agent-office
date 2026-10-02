@@ -1,5 +1,6 @@
-// The floor's GitHub boards: refreshing them, and merging, commenting on, closing and labeling
-// issues and pull requests, as whoever asks (see withGitHub).
+// The floor's boards (GitHub's or GitLab's): refreshing them, and merging, commenting on, closing and labeling
+// issues and pull requests, as whoever asks (see withForge).
+import { FORGES } from '../../../shared/forge.js';
 import type { GitHubClientMsg } from '../../../shared/protocol.js';
 import { GH_COMMENT_MAX, GH_LABEL_MAX } from '../../../shared/protocol.js';
 import { num, str } from '../../office/input.js';
@@ -19,13 +20,14 @@ export const githubHandlers = {
     const n = num(msg.number);
     const method = (['squash', 'merge', 'rebase'] as const).find((m) => m === msg.method);
     if (!floor || !Number.isSafeInteger(n) || n <= 0 || !method) return;
-    ctx.withGitHub(
+    ctx.withForge(
       c,
+      floor.github.kind,
       (as) =>
         void floor.github.merge(n, method, msg.deleteBranch === true, msg.auto === true, as).then((error) => {
           ctx.sendTo(c, { t: 'gh.merged', number: n, error });
           if (error) return;
-          ctx.toastFloor(floor, msg.auto ? `${who} set PR #${n} to merge once its checks pass` : `🎉 ${who} merged PR #${n}`);
+          ctx.toastFloor(floor, msg.auto ? `${who} set ${FORGES[floor.github.kind].pr} #${n} to merge once its checks pass` : `🎉 ${who} merged ${FORGES[floor.github.kind].pr} #${n}`);
           // An auto-merge rings once GitHub gets round to it and the boards see it merged.
           if (!msg.auto) floor.merged(n, who);
         }),
@@ -40,17 +42,18 @@ export const githubHandlers = {
     if (!floor || !Number.isSafeInteger(n) || n <= 0) return;
     const body = typeof msg.body === 'string' ? msg.body : '';
     // Refused rather than cut short: a comment that silently lost its end would read as finished.
-    const invalid = !body.trim() ? 'The comment is empty' : body.length > GH_COMMENT_MAX ? `GitHub takes comments of up to ${GH_COMMENT_MAX} characters` : '';
+    const invalid = !body.trim() ? 'The comment is empty' : body.length > GH_COMMENT_MAX ? `${FORGES[floor.github.kind].name} takes comments of up to ${GH_COMMENT_MAX} characters` : '';
     if (invalid) {
       ctx.sendTo(c, { t: 'gh.commented', kind, number: n, error: invalid });
       return;
     }
-    ctx.withGitHub(
+    ctx.withForge(
       c,
+      floor.github.kind,
       (as) =>
         void floor.github.comment(kind, n, body, as).then((r) => {
           ctx.sendTo(c, { t: 'gh.commented', kind, number: n, ...r });
-          if (r.comment) ctx.toastFloor(floor, `💬 ${who} commented on ${kind === 'pull' ? 'PR' : 'issue'} #${n}`);
+          if (r.comment) ctx.toastFloor(floor, `💬 ${who} commented on ${kind === 'pull' ? FORGES[floor.github.kind].pr : 'issue'} #${n}`);
         }),
       (error) => ctx.sendTo(c, { t: 'gh.commented', kind, number: n, error }),
     );
@@ -62,13 +65,14 @@ export const githubHandlers = {
     const kind = msg.kind === 'issue' || msg.kind === 'pull' ? msg.kind : undefined;
     if (!floor || !Number.isSafeInteger(n) || n <= 0 || !kind) return;
     const reason = msg.reason === 'not planned' ? 'not planned' : 'completed';
-    ctx.withGitHub(
+    ctx.withForge(
       c,
+      floor.github.kind,
       (as) =>
         void floor.github.close(kind, n, { comment: str(msg.comment, 20000).trim() || undefined, reason, deleteBranch: msg.deleteBranch === true }, as).then((error) => {
           ctx.sendTo(c, { t: 'gh.closed', kind, number: n, error });
           if (error) return;
-          if (kind === 'pull') return ctx.toastFloor(floor, `${who} closed PR #${n} without merging`);
+          if (kind === 'pull') return ctx.toastFloor(floor, `${who} closed ${FORGES[floor.github.kind].pr} #${n} without merging`);
           // Nobody should be seated for an issue that's closed.
           const dropped = floor.queue.dropIssue(n);
           ctx.toastFloor(floor, `${who} closed issue #${n}${reason === 'not planned' ? ' as not planned' : ''}${dropped ? ' and took it off the queue' : ''}`);
@@ -89,12 +93,13 @@ export const githubHandlers = {
       ctx.sendTo(c, { t: 'gh.labeled', kind, number: n, error: 'No labels to change' });
       return;
     }
-    ctx.withGitHub(
+    ctx.withForge(
       c,
+      floor.github.kind,
       (as) =>
         void floor.github.setLabels(kind, n, add, remove, as).then((r) => {
           ctx.sendTo(c, { t: 'gh.labeled', kind, number: n, ...r });
-          if (r.labels) ctx.toastFloor(floor, `🏷️ ${who} labeled ${kind === 'pull' ? 'PR' : 'issue'} #${n}: ${[...add.map((l) => `+${l}`), ...remove.map((l) => `−${l}`)].join(' ')}`);
+          if (r.labels) ctx.toastFloor(floor, `🏷️ ${who} labeled ${kind === 'pull' ? FORGES[floor.github.kind].pr : 'issue'} #${n}: ${[...add.map((l) => `+${l}`), ...remove.map((l) => `−${l}`)].join(' ')}`);
         }),
       (error) => ctx.sendTo(c, { t: 'gh.labeled', kind, number: n, error }),
     );

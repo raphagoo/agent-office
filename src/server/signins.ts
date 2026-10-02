@@ -1,43 +1,55 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as pty from '@lydell/node-pty';
+import { gitlabHosts, type ForgeKind } from '../shared/forge.js';
 import type { SignInKind, SignInState, SignInsState } from '../shared/protocol.js';
+import { seedClaude, trustFolders } from './signins-claude.js';
+import { gitConfigText, type GitUser } from './signins-git.js';
+import { kill, lastWords, plain, run } from './signins-util.js';
 
 /*
- * Everyone's own Claude and GitHub
- * --------------------------------
+ * Everyone's own Claude, GitHub and GitLab
+ * ----------------------------------------
  * In an office with accounts, each person's workers run on that person's own Claude plan and
- * GitHub account. Every account gets a folder, .agent-office/homes/<id>/, holding its own Claude
- * config (CLAUDE_CONFIG_DIR), gh config (GH_CONFIG_DIR) and git config (GIT_CONFIG_GLOBAL), and
- * whatever runs for that account gets those in its environment in place of the office's: its
- * workers, and what the office does on GitHub when they click (comment, merge, open a PR). Nothing
- * global changes, so any number of people can be signed in to different accounts at once.
+ * GitHub and GitLab accounts. Every account gets a folder, .agent-office/homes/<id>/, holding its own
+ * Claude config (CLAUDE_CONFIG_DIR), gh config (GH_CONFIG_DIR), glab config (GLAB_CONFIG_DIR) and git
+ * config (GIT_CONFIG_GLOBAL), and whatever runs for that account gets those in its environment in
+ * place of the office's: its workers, and what the office does on GitHub or GitLab when they click
+ * (comment, merge, open a PR). Nothing global changes, so any number of people can be signed in to
+ * different accounts at once, and one person can be signed in to both GitHub and GitLab.
  *
- * Signing in happens from the office: it runs `claude auth login` or `gh auth login --web` against
- * the account's folders and hands the browser the page to open (and GitHub's one-time code). A
- * token from `claude setup-token`, or a GitHub token, can be pasted instead, and a shell at a desk
- * runs with the same folders, so `claude auth login` typed there works too. Admins may keep using
- * the office machine's own sign-ins.
+ * Signing in happens from the office: it runs `claude auth login`, `gh auth login --web` or
+ * `glab auth login --device` against the account's folders and hands the browser the page to open
+ * (and the one-time code). A token from `claude setup-token`, or a GitHub or GitLab token, can be
+ * pasted instead, and a shell at a desk runs with the same folders, so `claude auth login` typed there
+ * works too. Admins may keep using the office machine's own sign-ins.
  *
  * An office without accounts (you alone, on the shared password) never comes here: everything runs
- * on the machine's own `claude` and `gh`, exactly as before.
+ * on the machine's own `claude`, `gh` and `glab`, exactly as before.
  */
 
 /** Credentials the office's own environment may carry. None of them reach anything run as someone else. */
 const CLAUDE_VARS = ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'];
-const GITHUB_VARS = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_CONFIG_DIR', 'GIT_CONFIG_GLOBAL'];
+const FORGE_VARS: Record<ForgeKind, string[]> = {
+  github: ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_CONFIG_DIR', 'GIT_CONFIG_GLOBAL'],
+  gitlab: ['GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN', 'OAUTH_TOKEN', 'CI_JOB_TOKEN', 'GLAB_CONFIG_DIR', 'GIT_CONFIG_GLOBAL'],
+};
+/** Where each forge CLI keeps its config, in an account's folder, and the variable that says so. */
+const FORGE_DIR: Record<ForgeKind, { dir: string; env: string }> = { github: { dir: 'gh', env: 'GH_CONFIG_DIR' }, gitlab: { dir: 'glab', env: 'GLAB_CONFIG_DIR' } };
+const FORGE_NAME: Record<ForgeKind, string> = { github: 'GitHub', gitlab: 'GitLab' };
+const FORGES: ForgeKind[] = ['github', 'gitlab'];
 /** GitHub's one-time codes last 15 minutes; a Claude sign-in link gets as long. */
 const FLOW_MS = 15 * 60_000;
 /** Someone's sign-ins are looked at again at most this often, unless they ask. */
 const LOOK_GAP_MS = 20_000;
-const LOOK_TIMEOUT_MS = 30_000;
 /** From `claude setup-token` (sk-ant-oat01-…), or an Anthropic API key (sk-ant-api03-…). */
 const CLAUDE_TOKEN = /^sk-ant-[a-z]+\d*-[A-Za-z0-9_-]{20,}$/;
 const API_KEY = /^sk-ant-api/;
-/** ghp_…, github_pat_…, gho_… and the like. */
-const GITHUB_TOKEN = /^[A-Za-z0-9_]{20,255}$/;
+/** ghp_…, github_pat_…, gho_… and the like; GitLab's glpat-… (it has dashes). */
+const FORGE_TOKEN: Record<ForgeKind, RegExp> = { github: /^[A-Za-z0-9_]{20,255}$/, gitlab: /^[A-Za-z0-9_-]{20,255}$/ };
+const TOKEN_HINT: Record<ForgeKind, string> = { github: 'ghp_…, github_pat_…', gitlab: 'glpat-…' };
 const ACCOUNT_ID = /^[A-Za-z0-9]{6,64}$/;
 const HELP_WHERE = '☰ → 🔐 Your sign-ins';
 
@@ -45,8 +57,11 @@ interface Saved {
   /** Unset: its own login, in its folder. A token pasted from `claude setup-token` (or an API key). The office machine's own (admins). */
   claude?: { use: 'token'; token: string } | { use: 'office' };
   github?: { use: 'office' };
+  gitlab?: { use: 'office' };
   /** Who the last look found each signed in as, so workers can start before the next look. */
-  seen?: { claude?: string; github?: string };
+  seen?: Partial<Record<SignInKind, string>>;
+  /** The name and private email of each forge login, for commits. */
+  users?: Partial<Record<ForgeKind, GitUser>>;
 }
 
 /** A sign-in the office is running for someone. */
@@ -59,12 +74,13 @@ interface Flow {
 interface Live {
   claude: Omit<SignInState, 'how'>;
   github: Omit<SignInState, 'how'>;
+  gitlab: Omit<SignInState, 'how'>;
   flows: Partial<Record<SignInKind, Flow>>;
   looking?: Promise<void>;
   lookedAt: number;
 }
 
-/** Whose gh the office runs for someone: their own sign-in's environment (`key` tells logins apart). */
+/** Whose gh or glab the office runs for someone: their own sign-in's environment (`key` tells logins apart). */
 export interface GhAs {
   key: string;
   env: Record<string, string>;
@@ -76,9 +92,10 @@ export class SignIns {
 
   constructor(
     dataDir: string,
-    /** The `claude` and `gh` binaries, or null when they aren't installed. */
+    /** The `claude`, `gh` and `glab` binaries, or null when they aren't installed. */
     private claude: string | null,
     private gh: string | null,
+    private glab: string | null,
     /** The office's own environment, which everyone's is built on. */
     private base: () => Record<string, string>,
     /** Whether the account may use the office's own sign-ins (admins). */
@@ -94,6 +111,7 @@ export class SignIns {
     return {
       claude: { ...l.claude, how: this.how(id, s, 'claude') },
       github: { ...l.github, how: this.how(id, s, 'github') },
+      gitlab: { ...l.gitlab, how: this.how(id, s, 'gitlab') },
       office: this.mayUseOffice(id),
     };
   }
@@ -104,16 +122,15 @@ export class SignIns {
     return this.how(id, s, 'claude') !== 'login' || !!s.seen?.claude;
   }
 
-  githubReady(id: string): boolean {
+  /** Whether `id` has a GitHub or GitLab sign-in the office can act on it with (their own, as far as the last look knows, or the office's). */
+  forgeReady(id: string, kind: ForgeKind): boolean {
     const s = this.load(id);
-    return this.how(id, s, 'github') === 'office' || !!s.seen?.github;
+    return this.how(id, s, kind) === 'office' || !!s.seen?.[kind];
   }
 
   /** What to tell someone who needs `which` signed in first. */
   why(which: SignInKind): string {
-    return which === 'claude'
-      ? `Sign in to Claude first (${HELP_WHERE}): your workers run on your own Claude plan`
-      : `Sign in to GitHub first (${HELP_WHERE}): the office acts on GitHub as you`;
+    return which === 'claude' ? `Sign in to Claude first (${HELP_WHERE}): your workers run on your own Claude plan` : `Sign in to ${FORGE_NAME[which]} first (${HELP_WHERE}): the office acts on ${FORGE_NAME[which]} as you`;
   }
 
   /**
@@ -127,10 +144,10 @@ export class SignIns {
     return `${how}:${s.claude?.use === 'token' ? s.claude.token.slice(-12) : ''}:${s.seen?.claude ?? ''}`;
   }
 
-  /** The GitHub login `id` acts as (for "you" on comments); undefined when it's the office's own or none. */
-  githubLogin(id: string): string | undefined {
+  /** The GitHub or GitLab login `id` acts as (for "you" on comments); undefined when it's the office's own or none. */
+  login(id: string, kind: ForgeKind): string | undefined {
     const s = this.load(id);
-    return this.how(id, s, 'github') === 'login' ? s.seen?.github?.replace(/^@/, '') : undefined;
+    return this.how(id, s, kind) === 'login' ? s.seen?.[kind]?.replace(/^@/, '') : undefined;
   }
 
   /**
@@ -140,26 +157,30 @@ export class SignIns {
   apply(id: string, env: Record<string, string>, dirs: string[] = [], only?: SignInKind): Record<string, string> {
     const s = this.load(id);
     const home = this.prepare(id);
-    if (only !== 'github' && this.how(id, s, 'claude') !== 'office') {
+    if ((!only || only === 'claude') && this.how(id, s, 'claude') !== 'office') {
       for (const k of CLAUDE_VARS) delete env[k];
       env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
       if (s.claude?.use === 'token') env[API_KEY.test(s.claude.token) ? 'ANTHROPIC_API_KEY' : 'CLAUDE_CODE_OAUTH_TOKEN'] = s.claude.token;
-      if (dirs.length) this.trust(env.CLAUDE_CONFIG_DIR, dirs);
+      if (dirs.length) trustFolders(this.base(), env.CLAUDE_CONFIG_DIR, dirs);
     }
-    if (only !== 'claude' && this.how(id, s, 'github') !== 'office') {
-      for (const k of GITHUB_VARS) delete env[k];
-      env.GH_CONFIG_DIR = path.join(home, 'gh');
+    for (const kind of FORGES) {
+      if ((only && only !== kind) || this.how(id, s, kind) === 'office') continue;
+      for (const k of FORGE_VARS[kind]) delete env[k];
+      env[FORGE_DIR[kind].env] = path.join(home, FORGE_DIR[kind].dir);
       env.GIT_CONFIG_GLOBAL = path.join(home, 'gitconfig');
     }
     return env;
   }
 
-  /** How the office runs gh for `id`: as them (GhAs), as itself (undefined, an admin's choice), or a reason it can't. */
-  ghAs(id: string): GhAs | undefined | string {
+  /** How the office runs gh (or glab, for a GitLab project) for `id`: as them (GhAs), as itself (undefined, an admin's choice), or a reason it can't. */
+  ghAs(id: string, kind: ForgeKind = 'github'): GhAs | undefined | string {
     const s = this.load(id);
-    if (this.how(id, s, 'github') === 'office') return undefined;
-    if (!s.seen?.github) return this.why('github');
-    return { key: id, env: this.apply(id, this.base(), [], 'github') };
+    if (this.how(id, s, kind) === 'office') return undefined;
+    if (!s.seen?.[kind]) return this.why(kind);
+    // Both forges' logins go in: a worker across repositories may have a pull request on each.
+    const env = this.base();
+    for (const k of FORGES) this.apply(id, env, [], k);
+    return { key: id, env };
   }
 
   /** Looks at who `id` is signed in as, now if `force`, else unless it just did. */
@@ -167,7 +188,7 @@ export class SignIns {
     const l = this.get(id);
     if (l.looking) return l.looking;
     if (!force && Date.now() - l.lookedAt < LOOK_GAP_MS) return Promise.resolve();
-    l.looking = Promise.all([this.lookClaude(id), this.lookGithub(id)]).then(() => {
+    l.looking = Promise.all([this.lookClaude(id), ...FORGES.map((k) => this.lookForge(id, k))]).then(() => {
       l.lookedAt = Date.now();
       l.looking = undefined;
       this.onChange(id);
@@ -177,7 +198,7 @@ export class SignIns {
 
   /** Starts signing `id` in from the office. The page to open comes through state(). Returns why it can't. */
   start(id: string, which: SignInKind): string | undefined {
-    return which === 'claude' ? this.startClaude(id) : this.startGithub(id);
+    return which === 'claude' ? this.startClaude(id) : this.startForge(id, which);
   }
 
   /** The code Claude's sign-in page showed, typed in where `claude auth login` waits for it. */
@@ -198,7 +219,7 @@ export class SignIns {
     void this.look(id, true);
   }
 
-  /** A pasted token: from `claude setup-token` (or an API key), or a GitHub token. Resolves to why it didn't take. */
+  /** A pasted token: from `claude setup-token` (or an API key), or a GitHub or GitLab token. Resolves to why it didn't take. */
   async token(id: string, which: SignInKind, raw: string): Promise<string | undefined> {
     const token = raw.trim();
     this.stop(id, which);
@@ -209,7 +230,7 @@ export class SignIns {
       this.save(id, s);
       // Claude asks once before it uses an API key from the environment; this one is theirs, so it's approved.
       if (API_KEY.test(token)) {
-        this.seed(path.join(this.prepare(id), 'claude'), (c) => {
+        seedClaude(path.join(this.prepare(id), 'claude'), (c) => {
           c.customApiKeyResponses ??= { approved: [], rejected: [] };
           const tail = token.slice(-20);
           if (!c.customApiKeyResponses.approved.includes(tail)) c.customApiKeyResponses.approved.push(tail);
@@ -218,14 +239,17 @@ export class SignIns {
       await this.look(id, true);
       return undefined;
     }
-    if (!this.gh) return "The GitHub CLI (gh) isn't installed on the office's machine";
-    if (!GITHUB_TOKEN.test(token)) return "That doesn't look like a GitHub token (ghp_…, github_pat_…)";
+    const bin = this.bin(which);
+    const name = FORGE_NAME[which];
+    if (!bin) return `The ${name} CLI (${which === 'github' ? 'gh' : 'glab'}) isn't installed on the office's machine`;
+    if (!FORGE_TOKEN[which].test(token)) return `That doesn't look like a ${name} token (${TOKEN_HINT[which]})`;
     const s = this.load(id);
-    delete s.github;
+    delete s[which];
     this.save(id, s);
-    const r = await run(this.gh, ['auth', 'login', '--hostname', 'github.com', '--with-token', '--insecure-storage'], this.githubEnv(id), `${token}\n`);
+    const login = which === 'github' ? ['auth', 'login', '--hostname', 'github.com', '--with-token', '--insecure-storage'] : ['auth', 'login', '--hostname', gitlabHosts()[0], '--stdin', '--git-protocol', 'https', '--insecure-storage'];
+    const r = await run(bin, login, this.forgeEnv(id, which), `${token}\n`);
     await this.look(id, true);
-    return r.code === 0 ? undefined : `GitHub didn't take that token: ${r.last || 'gh auth login failed'}`;
+    return r.code === 0 ? undefined : `${name} didn't take that token: ${r.last || `${which === 'github' ? 'gh' : 'glab'} auth login failed`}`;
   }
 
   /** Uses the office machine's own sign-in (admins only). */
@@ -246,16 +270,16 @@ export class SignIns {
     if (how === 'login') await this.logout(id, which);
     delete s[which];
     if (s.seen) delete s.seen[which];
+    if (s.users && which !== 'claude') delete s.users[which];
     this.save(id, s);
-    if (which === 'github') this.writeGitConfig(id);
+    if (which !== 'claude') this.writeGitConfig(id);
     await this.look(id, true);
   }
 
   /** An account is gone: sign its logins out and delete its folder. */
   forget(id: string) {
     if (!ACCOUNT_ID.test(id)) return;
-    this.stop(id, 'claude');
-    this.stop(id, 'github');
+    for (const which of ['claude', ...FORGES] as SignInKind[]) this.stop(id, which);
     this.live.delete(id);
     const home = path.join(this.homes, id);
     if (!existsSync(home)) return;
@@ -281,10 +305,7 @@ export class SignIns {
   }
 
   shutdown() {
-    for (const [id] of this.live) {
-      this.stop(id, 'claude');
-      this.stop(id, 'github');
-    }
+    for (const [id] of this.live) for (const which of ['claude', ...FORGES] as SignInKind[]) this.stop(id, which);
   }
 
   // ---------------------------------------------------------------------------
@@ -296,16 +317,16 @@ export class SignIns {
     return use === 'token' ? 'token' : 'login';
   }
 
+  private bin(kind: ForgeKind): string | null {
+    return kind === 'github' ? this.gh : this.glab;
+  }
+
   private get(id: string): Live {
     let l = this.live.get(id);
     if (!l) {
       const seen = this.load(id).seen ?? {};
-      l = {
-        claude: seen.claude ? { status: 'ok', who: seen.claude } : { status: 'none' },
-        github: seen.github ? { status: 'ok', who: seen.github } : { status: 'none' },
-        flows: {},
-        lookedAt: 0,
-      };
+      const of = (k: SignInKind): Omit<SignInState, 'how'> => (seen[k] ? { status: 'ok', who: seen[k] } : { status: 'none' });
+      l = { claude: of('claude'), github: of('github'), gitlab: of('gitlab'), flows: {}, lookedAt: 0 };
       this.live.set(id, l);
     }
     return l;
@@ -321,9 +342,11 @@ export class SignIns {
     const home = this.home(id);
     if (!existsSync(path.join(home, 'gitconfig'))) {
       for (const d of [this.homes, home, path.join(home, 'claude'), path.join(home, 'gh')]) mkdirSync(d, { recursive: true, mode: 0o700 });
-      this.seed(path.join(home, 'claude'));
+      seedClaude(path.join(home, 'claude'));
       this.writeGitConfig(id);
     }
+    // A folder made before GitLab was there has no glab config yet.
+    if (!existsSync(path.join(home, 'glab'))) mkdirSync(path.join(home, 'glab'), { recursive: true, mode: 0o700 });
     return home;
   }
 
@@ -362,11 +385,12 @@ export class SignIns {
     return env;
   }
 
-  private githubEnv(id: string): Record<string, string> {
+  /** The environment for `gh` or `glab` run as `id`'s own login. */
+  private forgeEnv(id: string, kind: ForgeKind): Record<string, string> {
     const env = this.base();
-    for (const k of GITHUB_VARS) delete env[k];
+    for (const k of FORGE_VARS[kind]) delete env[k];
     const home = this.prepare(id);
-    env.GH_CONFIG_DIR = path.join(home, 'gh');
+    env[FORGE_DIR[kind].env] = path.join(home, FORGE_DIR[kind].dir);
     env.GIT_CONFIG_GLOBAL = path.join(home, 'gitconfig');
     return env;
   }
@@ -388,13 +412,7 @@ export class SignIns {
     /** Where the output after the code was sent starts, to tell a wrong code apart from the first ask. */
     let sentAt = -1;
     const flow: Flow = {
-      stop: () => {
-        try {
-          p.kill();
-        } catch {
-          // already gone
-        }
-      },
+      stop: () => kill(p),
       write: (data) => {
         sentAt = out.length;
         p.write(data);
@@ -439,49 +457,62 @@ export class SignIns {
     return undefined;
   }
 
-  private startGithub(id: string): string | undefined {
-    if (!this.gh) return "The GitHub CLI (gh) isn't installed on the office's machine";
-    this.stop(id, 'github');
+  /** `gh auth login --web` or `glab auth login --device`: over pipes, they print the one-time code and the page, then wait for the forge to say yes. */
+  private startForge(id: string, kind: ForgeKind): string | undefined {
+    const bin = this.bin(kind);
+    const name = FORGE_NAME[kind];
+    if (!bin) return `The ${name} CLI (${kind === 'github' ? 'gh' : 'glab'}) isn't installed on the office's machine`;
+    this.stop(id, kind);
     const l = this.get(id);
-    const env = { ...this.githubEnv(id), BROWSER: 'true', GH_BROWSER: 'true' };
-    // Over pipes, gh prints the one-time code and the page, then waits for GitHub to say yes.
-    const p = spawn(this.gh, ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--insecure-storage', '--skip-ssh-key'], { cwd: this.home(id), env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const env = { ...this.forgeEnv(id, kind), BROWSER: 'true', GH_BROWSER: 'true' };
+    const args =
+      kind === 'github'
+        ? ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--insecure-storage', '--skip-ssh-key']
+        : ['auth', 'login', '--hostname', gitlabHosts()[0], '--device', '--git-protocol', 'https', '--insecure-storage'];
+    const p = spawn(bin, args, { cwd: this.home(id), env, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
-    const flow: Flow = { stop: () => p.kill() };
+    const flow: Flow = { stop: () => kill(p) };
     const timer = setTimeout(flow.stop, FLOW_MS);
     const onData = (d: Buffer) => {
       out = (out + d.toString('utf8')).slice(-20_000);
-      if (l.flows.github !== flow || l.github.pending?.code) return;
-      const code = /one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})/i.exec(out)?.[1];
-      if (!code) return;
-      const url = /https:\/\/github\.com\/login\/device\S*/.exec(out)?.[0] ?? 'https://github.com/login/device';
-      l.github = { status: 'busy', pending: { url, code } };
+      if (l.flows[kind] !== flow || l[kind].pending?.url) return;
+      const text = plain(out);
+      if (kind === 'github') {
+        const code = /one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})/i.exec(out)?.[1];
+        if (!code) return;
+        l.github = { status: 'busy', pending: { url: /https:\/\/github\.com\/login\/device\S*/.exec(out)?.[0] ?? 'https://github.com/login/device', code } };
+      } else {
+        // glab prints the page to open and, unless the address carries it, the code to type there.
+        const url = /https:\/\/\S+/.exec(text)?.[0]?.replace(/[.,)]+$/, '');
+        if (!url) return;
+        l.gitlab = { status: 'busy', pending: { url, code: /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/.exec(text)?.[1] } };
+      }
       this.onChange(id);
     };
     p.stdout.on('data', onData);
     p.stderr.on('data', onData);
     p.on('error', (err) => {
-      if (l.flows.github !== flow) return;
-      delete l.flows.github;
+      if (l.flows[kind] !== flow) return;
+      delete l.flows[kind];
       clearTimeout(timer);
-      l.github = { status: 'none', error: `Couldn't start gh: ${err.message}` };
+      l[kind] = { status: 'none', error: `Couldn't start ${kind === 'github' ? 'gh' : 'glab'}: ${err.message}` };
       this.onChange(id);
     });
     p.on('exit', (exitCode) => {
       clearTimeout(timer);
-      if (l.flows.github !== flow) return;
-      delete l.flows.github;
+      if (l.flows[kind] !== flow) return;
+      delete l.flows[kind];
       if (exitCode === 0) {
         const s = this.load(id);
-        delete s.github;
+        delete s[kind];
         this.save(id, s);
-        l.github = { status: 'busy' };
-      } else l.github = { status: 'none', error: lastWords(out) || 'Signing in stopped before it finished' };
+        l[kind] = { status: 'busy' };
+      } else l[kind] = { status: 'none', error: lastWords(out) || 'Signing in stopped before it finished' };
       this.onChange(id);
       void this.look(id, true);
     });
-    l.flows.github = flow;
-    l.github = { status: 'busy', pending: {} };
+    l.flows[kind] = flow;
+    l[kind] = { status: 'busy', pending: {} };
     this.onChange(id);
     return undefined;
   }
@@ -513,31 +544,35 @@ export class SignIns {
     this.remember(id, 'claude', how === 'office' ? undefined : who);
   }
 
-  private async lookGithub(id: string) {
+  private async lookForge(id: string, kind: ForgeKind) {
     const l = this.get(id);
-    if (l.flows.github) return;
+    if (l.flows[kind]) return;
     const s = this.load(id);
-    const how = this.how(id, s, 'github');
-    if (!this.gh) {
-      l.github = { status: 'none', error: "The GitHub CLI (gh) isn't installed on the office's machine" };
+    const how = this.how(id, s, kind);
+    const bin = this.bin(kind);
+    const cli = kind === 'github' ? 'gh' : 'glab';
+    if (!bin) {
+      l[kind] = { status: 'none', error: `The ${FORGE_NAME[kind]} CLI (${cli}) isn't installed on the office's machine` };
       return;
     }
-    const r = await run(this.gh, ['api', 'user', '--jq', '{login, id, name}'], how === 'office' ? this.base() : this.githubEnv(id));
-    if (l.flows.github) return;
-    let user: { login?: string; id?: number; name?: string | null } = {};
+    const args = kind === 'github' ? ['api', 'user', '--jq', '{login, id, name}'] : ['api', 'user', '--hostname', gitlabHosts()[0]];
+    const r = await run(bin, args, how === 'office' ? this.base() : this.forgeEnv(id, kind));
+    if (l.flows[kind]) return;
+    let user: { login?: string; username?: string; id?: number; name?: string | null } = {};
     try {
       user = r.code === 0 ? JSON.parse(r.out) : {};
     } catch {
       // not JSON: treated as not signed in
     }
-    if (user.login) {
-      l.github = { status: 'ok', who: `@${user.login}` };
-      if (how !== 'office') this.writeGitConfig(id, { name: user.name?.trim() || user.login, email: `${user.id}+${user.login}@users.noreply.github.com` });
+    const login = user.login ?? user.username;
+    if (login) {
+      l[kind] = { status: 'ok', who: `@${login}` };
+      if (how !== 'office') this.rememberUser(id, kind, { name: user.name?.trim() || login, email: kind === 'github' ? `${user.id}+${login}@users.noreply.github.com` : `${user.id}-${login}@users.noreply.gitlab.com` });
     } else {
-      const signedOut = /auth login|not logged in|authenticat|401|bad credentials/i.test(r.last);
-      l.github = { status: 'none', error: signedOut || !r.last ? undefined : r.last };
+      const signedOut = /auth login|not logged in|authenticat|401|unauthorized|bad credentials/i.test(r.last);
+      l[kind] = { status: 'none', error: signedOut || !r.last ? undefined : r.last };
     }
-    this.remember(id, 'github', how === 'office' ? undefined : l.github.who);
+    this.remember(id, kind, how === 'office' ? undefined : l[kind].who);
   }
 
   /** Keeps who the last look found, for the next start of the office. */
@@ -549,112 +584,42 @@ export class SignIns {
     this.save(id, s);
   }
 
+  /** Keeps the name and private email of a forge login for commits, and writes them into the account's git config. */
+  private rememberUser(id: string, kind: ForgeKind, user: GitUser) {
+    const s = this.load(id);
+    if (s.users?.[kind]?.name === user.name && s.users[kind]?.email === user.email) return;
+    s.users = { ...s.users, [kind]: user };
+    this.save(id, s);
+    this.writeGitConfig(id);
+  }
+
   private async logout(id: string, which: SignInKind) {
     if (which === 'claude') {
       if (this.claude) await run(this.claude, ['auth', 'logout'], this.claudeEnv(id));
-    } else {
-      if (this.gh) await run(this.gh, ['auth', 'logout', '--hostname', 'github.com'], this.githubEnv(id));
-      rmSync(path.join(this.home(id), 'gh', 'hosts.yml'), { force: true });
-    }
-  }
-
-  /** Claude's own settings in an account's folder: its first-run questions already answered. */
-  private seed(dir: string, change?: (c: any) => void) {
-    const file = path.join(dir, '.claude.json');
-    let c: any = {};
-    try {
-      c = JSON.parse(readFileSync(file, 'utf8'));
-    } catch {
-      // new
-    }
-    const before = JSON.stringify(c);
-    c.hasCompletedOnboarding = true;
-    change?.(c);
-    if (JSON.stringify(c) === before) return;
-    try {
-      writeFileSync(file, JSON.stringify(c, null, 2), { mode: 0o600 });
-    } catch (err) {
-      console.error(`agent-office: couldn't write ${file}: ${(err as Error).message}`);
-    }
-  }
-
-  /** Folders the office's own Claude trusts, the account's Claude trusts too: they're the same projects. */
-  private trust(configDir: string, dirs: string[]) {
-    let office: any;
-    try {
-      const base = this.base();
-      office = JSON.parse(readFileSync(base.CLAUDE_CONFIG_DIR ? path.join(base.CLAUDE_CONFIG_DIR, '.claude.json') : path.join(os.homedir(), '.claude.json'), 'utf8'));
-    } catch {
       return;
     }
-    const trusted = (d: string) => office?.projects?.[d]?.hasTrustDialogAccepted === true;
-    if (!dirs.some(trusted)) return;
-    this.seed(configDir, (c) => {
-      c.projects ??= {};
-      for (const d of dirs) c.projects[d] = { ...c.projects[d], hasTrustDialogAccepted: true };
-    });
+    const bin = this.bin(which);
+    if (bin) await run(bin, which === 'github' ? ['auth', 'logout', '--hostname', 'github.com'] : ['auth', 'logout', '--hostname', gitlabHosts()[0]], this.forgeEnv(id, which));
+    rmSync(path.join(this.home(id), FORGE_DIR[which].dir, which === 'github' ? 'hosts.yml' : 'config.yml'), { force: true });
   }
 
-  /**
-   * The account's git config: the office's own (included), with gh as the credentials for GitHub,
-   * so pushes go out as them, and their GitHub name and private email on commits once it's known.
-   */
-  private writeGitConfig(id: string, user?: { name: string; email: string }) {
+  /** The account's git config (see signins-git.ts): the office's own, the forges' credentials and the identities found. */
+  private writeGitConfig(id: string) {
     const home = this.home(id);
     const base = this.base();
     const xdg = base.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
     const includes = base.GIT_CONFIG_GLOBAL ? [base.GIT_CONFIG_GLOBAL] : [path.join(xdg, 'git', 'config'), path.join(os.homedir(), '.gitconfig')];
-    const lines = ['# Written by Agent Office: git for this account, on top of the office machine’s own settings.', '[include]', ...includes.map((p) => `\tpath = ${quote(p)}`)];
-    if (this.gh) {
-      for (const host of ['https://github.com', 'https://gist.github.com']) {
-        lines.push(`[credential ${quote(host)}]`, '\thelper =', `\thelper = ${quote(`!'${this.gh.replace(/'/g, `'\\''`)}' auth git-credential`)}`);
+    const gitlabFile = path.join(home, 'gitconfig-gitlab');
+    const text = gitConfigText({ includes, bins: { github: this.gh ?? undefined, gitlab: this.glab ?? undefined }, gitlabHosts: gitlabHosts(), users: this.load(id).users ?? {}, gitlabFile });
+    const put = (file: string, content: string | undefined) => {
+      try {
+        if (content === undefined) rmSync(file, { force: true });
+        else if (!existsSync(file) || readFileSync(file, 'utf8') !== content) writeFileSync(file, content, { mode: 0o600 });
+      } catch (err) {
+        console.error(`agent-office: couldn't write ${file}: ${(err as Error).message}`);
       }
-    }
-    if (user) lines.push('[user]', `\tname = ${quote(user.name)}`, `\temail = ${quote(user.email)}`);
-    const text = `${lines.join('\n')}\n`;
-    const file = path.join(home, 'gitconfig');
-    try {
-      if (existsSync(file) && readFileSync(file, 'utf8') === text) return;
-      writeFileSync(file, text, { mode: 0o600 });
-    } catch (err) {
-      console.error(`agent-office: couldn't write ${file}: ${(err as Error).message}`);
-    }
+    };
+    put(path.join(home, 'gitconfig'), text.main);
+    put(gitlabFile, text.gitlab);
   }
-}
-
-/** A value for a git config file, quoted. */
-function quote(v: string): string {
-  return `"${v.replace(/[\p{C}]/gu, '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-}
-
-/** Terminal output as plain text: no colors, links or cursor moves. */
-function plain(s: string): string {
-  return s
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\x1b[@-_]/g, '')
-    .replace(/\r\n?/g, '\n');
-}
-
-/** The last thing a command said, minus the link and the prompt, for an error line. */
-function lastWords(s: string): string {
-  const lines = plain(s)
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l && !/https?:\/\/|paste code|opening browser|press enter/i.test(l));
-  return (lines.at(-1) ?? '').slice(0, 300);
-}
-
-/** Runs a command to the end; never rejects. `last` is the last line it said on stderr (or stdout). */
-function run(cmd: string, args: string[], env: Record<string, string>, input?: string): Promise<{ code: number; out: string; last: string }> {
-  return new Promise((resolve) => {
-    const p = execFile(cmd, args, { env, timeout: LOOK_TIMEOUT_MS, maxBuffer: 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
-      const e = err as { code?: number | string } | null;
-      const code = !e ? 0 : typeof e.code === 'number' ? e.code : -1;
-      const last = lastWords(stderr || (err && !stdout ? err.message : ''));
-      resolve({ code, out: stdout.trim(), last });
-    });
-    if (input !== undefined) p.stdin?.end(input);
-    else p.stdin?.end();
-  });
 }

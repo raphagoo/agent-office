@@ -1,5 +1,6 @@
 /** The bookshelf: the project's docs to read, with a book in your hands (and a swish as its pages turn). */
 import type { Ctx } from '../../core/context';
+import { repoWebOfRemote } from '../../../shared/forge';
 import { aside, hintTitle, key, onE } from '../../core/hint';
 import { saveSettings, store } from '../../state';
 import { openBookshelf } from './ui';
@@ -12,11 +13,6 @@ declare module '../../world/types' {
   }
 }
 
-/** The project on GitHub, from the floor's origin remote, when that's where it is. */
-function githubUrl(remote?: string): string | undefined {
-  const m = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote ?? '');
-  return m ? `https://github.com/${m[1]}` : undefined;
-}
 
 export function installBookshelf(ctx: Ctx) {
   const { settings } = ctx;
@@ -26,7 +22,8 @@ export function installBookshelf(ctx: Ctx) {
     openBookshelf({
       floor: store.floor,
       project: store.project?.name,
-      repoUrl: githubUrl(store.project?.remote),
+      // The project on GitHub or GitLab, from the floor's origin remote, when that's where it is.
+      repoUrl: repoWebOfRemote(store.project?.remote),
       onTurn: turnPage,
       pageSound: settings.pageTurns,
       onPageSound: (on) => {

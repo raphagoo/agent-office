@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { ChangesState, FloorInfo, PeerInfo, ProjectInfo, ServerMsg, WorkerInfo } from '../shared/protocol.js';
+import { FORGES, type ForgeKind } from '../shared/forge.js';
 import { isBusy } from '../shared/status.js';
 import { DESK_BY_ID } from '../shared/layout.js';
 import type { FloorDef } from './building.js';
@@ -45,8 +46,8 @@ export interface FloorContext {
   prompts: PromptSource;
   /** Workers hired by an account run on its own sign-ins (see signins.ts). */
   runAs?: RunAs;
-  /** How to run gh as an account: its own sign-in, the office's (undefined), or why it can't. */
-  ghAs(owner: string | undefined): GhAs | undefined | string;
+  /** How to run gh (or glab, for a GitLab project) as an account: its own sign-in, the office's (undefined), or why it can't. */
+  ghAs(owner: string | undefined, kind: ForgeKind): GhAs | undefined | string;
   /** To everyone on this floor. */
   emit(floor: Floor, msg: ServerMsg, droppable?: boolean): void;
   toast(floor: Floor, text: string, level?: ToastLevel): void;
@@ -216,12 +217,13 @@ export class Floor {
         // A worker may have opened one from a branch it made itself, mid-turn or from a shell.
         void this.workers.syncBranches();
         for (const p of this.merges.look(state.items)) {
-          ctx.toast(this, `🎉 PR #${p.number} merged: ${p.title}`);
+          ctx.toast(this, `🎉 ${FORGES[this.github.kind].pr} #${p.number} merged: ${p.title}`);
           this.merged(p.number);
         }
         this.sendLandedHome();
         ctx.pullsChanged(this);
       },
+      def.repo,
     );
     // The 📋 task queue seats workers by itself: it watches the workers and links PRs from GitHub.
     this.queue = new TaskQueue(dataDir, this.workers, !!this.project.branch, {
@@ -232,7 +234,7 @@ export class Floor {
       },
       toast: (text, level) => ctx.toast(this, text, level),
       claimIssue: (issue, owner) => {
-        const as = ctx.ghAs(owner);
+        const as = ctx.ghAs(owner, this.github.kind);
         return typeof as === 'string' ? Promise.resolve(as) : this.github.claim(issue, as);
       },
       refreshGitHub: () => void this.github.refresh(),
@@ -242,7 +244,7 @@ export class Floor {
         ctx.toast(this, '📋 The queue is empty: every task is done 🎉');
         ctx.emit(this, { t: 'gong', why: 'queue' });
       },
-      worktreeNote: () => officePrompt(ctx.prompts, 'queue.worktree'),
+      worktreeNote: () => officePrompt(ctx.prompts, 'queue.worktree', {}, this.github.kind),
     });
 
     // Meetings seat their own workers round the meeting room's table and run them round by round.
@@ -267,7 +269,7 @@ export class Floor {
         toast: (text, level) => ctx.toast(this, text, level),
         hiringPaused: () => ctx.ledger.hiringPaused,
         postReview: (pr, file, owner) => {
-          const as = ctx.ghAs(owner);
+          const as = ctx.ghAs(owner, this.github.kind);
           return typeof as === 'string' ? Promise.reject(new Error(as)) : this.github.review(pr, file, as);
         },
         prompt: (id) => ctx.prompts.text(id),

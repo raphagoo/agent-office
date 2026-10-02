@@ -25,6 +25,7 @@ import type { OfficePrompts } from '../prompts.js';
 import type { LeaveOnMerge } from '../leave-on-merge.js';
 import type { ChatLog } from '../history.js';
 import type { Arcade, HighScores } from '../cabinet.js';
+import type { ForgeKind } from '../../shared/forge.js';
 import type { AgentProvider, FloorInfo, Me, ServerMsg, ServiceInfo, ServicesState, SignInKind } from '../../shared/protocol.js';
 import type { Client } from './client.js';
 import type { Spot } from './input.js';
@@ -170,8 +171,8 @@ export interface Gates {
    * are still there.
    */
   withFreshBase(c: Client, floor: Floor | Floor[], go: () => void): void;
-  /** Runs `go` with how the office acts on GitHub for `c`: as them, or as itself (no account, or an admin's choice). */
-  withGitHub(c: Client, go: (as: GhAs | undefined) => void, refused?: (why: string) => void): void;
+  /** Runs `go` with how the office acts on a project's forge (GitHub or GitLab) for `c`: as them, or as itself (no account, or an admin's choice). */
+  withForge(c: Client, kind: ForgeKind, go: (as: GhAs | undefined) => void, refused?: (why: string) => void): void;
   /** Needs a Claude sign-in of its own when the worker it starts runs Claude. */
   claudeFor(provider: string | undefined): SignInKind | undefined;
 }

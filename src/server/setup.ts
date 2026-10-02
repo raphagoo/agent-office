@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -9,8 +9,9 @@ import { normalizeRepo, sameRepo } from '../shared/floors.js';
 import type { RepoChoice } from '../shared/protocol.js';
 import { Building, tildify } from './building.js';
 import { officeHome, type Config } from './config.js';
+import { opsOf } from './forge/index.js';
 
-// Setting up an office from its terminal: where projects are cloned, signing the GitHub CLI in, and
+// Setting up an office from its terminal: where projects are cloned, signing the GitHub (and GitLab) CLIs in, and
 // picking the first repositories to clone as floors. A new office walks you through it the first time
 // it starts in a terminal, so it opens on projects of your own instead of an empty building (or
 // whatever folder it happened to be started in). `agent-office setup` runs it again, or does it
@@ -37,7 +38,7 @@ while the office is stopped; while it runs, use its elevator and ⚙️ Settings
 Options:
       --home <dir>        The office to set up (default ~/agent-office, env AGENT_OFFICE_HOME)
       --projects <dir>    Clone new projects into <dir>/<owner>/<repo> from now on
-      --project <repo>    Clone this repository (owner/name or a GitHub URL) as a floor.
+      --project <repo>    Clone this repository (owner/name, a GitHub URL, or gitlab.com/group/project) as a floor.
                           Repeat it for more than one
   -h, --help              Show this help
 `;
@@ -148,17 +149,18 @@ export async function setupCommand(argv: string[]): Promise<number> {
 async function walkthrough(building: Building, dataDir: string, askFolder: boolean) {
   if (askFolder) await pickFolder(building);
   const login = await githubLogin(dataDir);
-  if (!login) {
-    console.log('\n  Add projects from the elevator in the office once gh is ready (or run `agent-office setup` again).');
+  const gitlab = await gitlabLogin(dataDir);
+  if (!login && !gitlab) {
+    console.log('\n  Add projects from the elevator in the office once gh (or glab, for GitLab) is ready (or run `agent-office setup` again).');
     return;
   }
-  await pickProjects(building, login);
+  await pickProjects(building, login ?? gitlab!);
 }
 
 async function pickFolder(building: Building) {
   const now = building.projectsDirState();
   const suggestion = now.custom ? now.dir : tildify(suggestedFolder(building.projectsDir));
-  console.log(`\n  📁 Where should the office clone your projects? Each one goes in <folder>/<owner>/<repo>.`);
+  console.log(`\n  📁 Where should the office clone your projects? Each one goes in <folder>/<owner>/<repo> (GitLab ones in <folder>/gitlab.com/<group>/<project>).`);
   for (;;) {
     const answer = (await ask(`     Folder [${suggestion}]: `)) || suggestion;
     const err = building.setProjectsDir(answer, whoAmI());
@@ -210,19 +212,34 @@ async function githubLogin(cwd: string): Promise<string | undefined> {
   }
 }
 
-function ghUser(cwd: string): Promise<{ login?: string; missing?: boolean; signedOut?: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    execFile('gh', ['api', 'user', '--jq', '.login'], { cwd, timeout: 30_000 }, (err, stdout, stderr) => {
-      if (!err && stdout.trim()) return resolve({ login: stdout.trim() });
-      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return resolve({ missing: true });
-      const why = String(stderr || err?.message || '').trim();
-      resolve({ signedOut: /auth login|not logged in|authentication|bad credentials|HTTP 401/i.test(why), error: why.split('\n').filter(Boolean).slice(-1)[0] ?? 'gh failed' });
-    });
-  });
+const ghUser = (cwd: string) => opsOf('github').whoami(cwd);
+
+/**
+ * Who `glab` is signed in to GitLab as, for those who use it. GitLab is optional: no glab, or not
+ * signed in and not wanting to be, only means GitLab projects aren't listed. Undefined then.
+ */
+async function gitlabLogin(cwd: string): Promise<string | undefined> {
+  const ops = opsOf('gitlab');
+  let me = await ops.whoami(cwd);
+  if (me.login) {
+    console.log(`\n  🦊 Signed in to GitLab as ${me.login}`);
+    return me.login;
+  }
+  if (me.missing) {
+    console.log('\n  🦊 To use GitLab projects too, install the GitLab CLI (glab, https://gitlab.com/gitlab-org/cli) and run `glab auth login`.');
+    return undefined;
+  }
+  if (!me.signedOut) return undefined;
+  console.log("\n  🦊 The GitLab CLI (glab) isn't signed in, so GitLab projects can't be cloned.");
+  if (!/^y/i.test(await ask('     Sign in to GitLab now? [y/N] '))) return undefined;
+  spawnSync('glab', ['auth', 'login'], { stdio: 'inherit' });
+  me = await ops.whoami(cwd);
+  if (me.login) console.log(`     ✓ Signed in to GitLab as ${me.login}`);
+  return me.login;
 }
 
 async function pickProjects(building: Building, login: string) {
-  process.stdout.write('     Asking GitHub for your repositories…');
+  process.stdout.write('     Asking GitHub and GitLab for your repositories…');
   let repos: RepoChoice[] = [];
   try {
     repos = await building.repos();

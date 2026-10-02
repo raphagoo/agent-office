@@ -3,9 +3,10 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync
 import os from 'node:os';
 import path from 'node:path';
 import { FLOOR_PALETTES, MAX_FLOORS, normalizeRepo, sameRepo } from '../shared/floors.js';
+import { forgeMeta, forgeOf, repoFolders, repoHost } from '../shared/forge.js';
 import type { CloneProgress, ProjectsDirState, RepoChoice } from '../shared/protocol.js';
 import { CloneRun, dropLog, whyCloneFailed, type CloneEnd, type CloneRunOptions } from './clone.js';
-import { gh } from './github.js';
+import { opsOf, originRepo, type CloneCommand } from './forge/index.js';
 
 /** A floor as floors.json keeps it. */
 export interface FloorDef {
@@ -297,21 +298,21 @@ export class Building {
       this.save();
       return def;
     }
-    // Asking GitHub first says whether this login can see it at all, and gets the name's real case.
+    // Asking the forge first says whether this login can see it at all, and gets the name's real case.
     let repo: string;
     let empty = false;
     try {
-      const view = JSON.parse(await gh(['repo', 'view', wanted, '--json', 'nameWithOwner,isEmpty'], this.dataDir, 30_000)) as { nameWithOwner?: string; isEmpty?: boolean };
-      repo = normalizeRepo(view.nameWithOwner) ?? wanted;
-      empty = view.isEmpty === true;
+      ({ repo, empty } = await opsOf(forgeOf(wanted)).viewRepo(wanted, this.dataDir));
     } catch (err) {
-      return `Couldn't find ${wanted} on GitHub: ${(err as Error).message}`;
+      return `Couldn't find ${wanted} on ${forgeMeta(wanted).name}: ${(err as Error).message}`;
     }
     const key = repo.toLowerCase();
     if (this.defs.some((d) => sameRepo(d.repo, repo))) return `${repo} already has a floor`;
     if (this.cloning.has(key)) return `${repo} is already being cloned`;
-    const [owner, name] = repo.split('/');
-    const dest = path.join(this.projectsDir, owner, name);
+    // <projects>/<owner>/<name>; a GitLab project, which may be in subgroups, goes under its host.
+    const folders = repoFolders(repo);
+    const name = folders[folders.length - 1];
+    const dest = path.join(this.projectsDir, ...folders);
     if (this.defs.some((d) => path.resolve(d.dir) === dest)) return `${dest} is already a floor`;
     const def = this.newDef(name, repo, dest, by);
     const pending: Pending = { def, owner: account, empty };
@@ -342,13 +343,14 @@ export class Building {
     } catch (err) {
       return `Couldn't make ${path.dirname(dest)}: ${(err as Error).message}`;
     }
-    if (this.opts.terminal) return cloneHere(repo, dest);
+    const ops = opsOf(forgeOf(repo));
+    if (this.opts.terminal) return cloneHere(ops.cloneCommand(repo, dest, false), repo, dest);
     try {
       mkdirSync(this.logsDir, { recursive: true, mode: 0o700 });
     } catch (err) {
       return `Couldn't make ${this.logsDir}: ${(err as Error).message}`;
     }
-    const run = await CloneRun.start(repo, dest, path.join(this.logsDir, `${repo.replace('/', '__')}.log`), { ...this.opts.clone, changed: () => this.cloneChanged?.() });
+    const run = await CloneRun.start(ops.cloneCommand(repo, dest, true), dest, path.join(this.logsDir, `${repo.replace(/\//g, '__')}.log`), { ...this.opts.clone, forge: forgeOf(repo), changed: () => this.cloneChanged?.() });
     if (typeof run === 'string') return run;
     p.run = run;
     this.saveClones();
@@ -361,14 +363,14 @@ export class Building {
     if (end.stopped) return end.stopped;
     // Its exit code isn't the word on it (a clone an office before this one started has none): the checkout is.
     if (checkoutAt(p.def.dir, p.def.repo!, p.empty) === 'ok') return undefined;
-    return `Couldn't clone ${p.def.repo}: ${whyCloneFailed(end.output)}`;
+    return `Couldn't clone ${p.def.repo}: ${whyCloneFailed(end.output, forgeOf(p.def.repo), repoHost(p.def.repo!))}`;
   }
 
   private pendingFloor(id: string): Pending | undefined {
     return [...this.cloning.values()].find((p) => p.def.id === id);
   }
 
-  /** Repositories the office's `gh` login can clone, most recently pushed first. */
+  /** Repositories the office's `gh` and `glab` logins can clone, most recently pushed first. */
   async repos(refresh = false): Promise<RepoChoice[]> {
     const cached = this.repoCache;
     if (cached && !refresh && Date.now() - cached.at < REPOS_TTL_MS) return cached.repos;
@@ -510,15 +512,7 @@ function unwritable(dir: string): string | undefined {
   return undefined;
 }
 
-/** The GitHub repository a checkout's origin points at. */
-export function originRepo(dir: string): string | undefined {
-  try {
-    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim();
-    return /github\.com[/:]/i.test(url) ? normalizeRepo(url) : undefined;
-  } catch {
-    return undefined;
-  }
-}
+export { originRepo };
 
 /**
  * What's at `dest`: nothing yet ('none'), a checkout of `repo` ('ok'), or why it's in the way. A
@@ -542,46 +536,32 @@ function hasCommit(dir: string): boolean {
   }
 }
 
-/** Clones `repo` to `dest` in this terminal: git shows its progress, and ssh or git can ask here. Resolves to an error, if any. */
-function cloneHere(repo: string, dest: string): Promise<string | undefined> {
+/** Runs a clone in this terminal: git shows its progress, and ssh or git can ask here. Resolves to an error, if any. */
+function cloneHere(command: CloneCommand, repo: string, dest: string): Promise<string | undefined> {
+  const forge = forgeMeta(repo);
   return new Promise((resolve) => {
-    const child = spawn('gh', ['repo', 'clone', repo, dest], { cwd: path.dirname(dest), stdio: 'inherit' });
-    child.once('error', (err: NodeJS.ErrnoException) => resolve(err.code === 'ENOENT' ? "The GitHub CLI (gh) isn't installed on this machine" : `Couldn't run gh: ${err.message}`));
-    child.once('exit', (code, signal) => resolve(code === 0 ? undefined : `Couldn't clone ${repo}: gh ${signal ? `stopped (${signal})` : `failed (exit ${code})`}`));
+    const child = spawn(command.cmd, command.args, { cwd: path.dirname(dest), stdio: 'inherit', env: { ...process.env, ...command.env } });
+    child.once('error', (err: NodeJS.ErrnoException) => resolve(err.code === 'ENOENT' ? `The ${forge.name} CLI (${forge.cli}) isn't installed on this machine` : `Couldn't run ${forge.cli}: ${err.message}`));
+    child.once('exit', (code, signal) => resolve(code === 0 ? undefined : `Couldn't clone ${repo}: ${forge.cli} ${signal ? `stopped (${signal})` : `failed (exit ${code})`}`));
   });
 }
 
+/**
+ * What GitHub's `gh` and GitLab's `glab` logins can clone. One of them not being installed or signed
+ * in only matters when neither is: then it says what each said.
+ */
 async function listRepos(cwd: string): Promise<RepoChoice[]> {
-  const out = await gh(
-    [
-      'api',
-      '--paginate',
-      'user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member',
-      '--jq',
-      '.[] | {name: .full_name, description: (.description // ""), private: .private, pushedAt: .pushed_at}',
-    ],
-    cwd,
-    90_000,
-  );
+  const [hub, lab] = await Promise.allSettled([opsOf('github').listRepos(cwd), opsOf('gitlab').listRepos(cwd)]);
+  if (hub.status === 'rejected' && lab.status === 'rejected') {
+    const why = [hub.reason, lab.reason].map((e) => (e as Error).message);
+    throw new Error(why[0] === why[1] ? why[0] : why.join(' · '));
+  }
   const repos: RepoChoice[] = [];
   const seen = new Set<string>();
-  for (const line of out.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const r = JSON.parse(line) as { name?: unknown; description?: unknown; private?: unknown; pushedAt?: unknown };
-      const name = normalizeRepo(r.name);
-      if (!name || seen.has(name.toLowerCase())) continue;
-      seen.add(name.toLowerCase());
-      repos.push({
-        name,
-        description: typeof r.description === 'string' && r.description ? r.description.slice(0, 200) : undefined,
-        private: r.private === true,
-        pushedAt: typeof r.pushedAt === 'string' ? r.pushedAt : undefined,
-      });
-    } catch {
-      // not a line of ours
-    }
-    if (repos.length >= MAX_REPOS) break;
+  for (const r of [...(hub.status === 'fulfilled' ? hub.value : []), ...(lab.status === 'fulfilled' ? lab.value : [])]) {
+    if (seen.has(r.name.toLowerCase())) continue;
+    seen.add(r.name.toLowerCase());
+    repos.push(r);
   }
-  return repos.sort((a, b) => (b.pushedAt ?? '').localeCompare(a.pushedAt ?? ''));
+  return repos.sort((a, b) => (b.pushedAt ?? '').localeCompare(a.pushedAt ?? '')).slice(0, MAX_REPOS);
 }

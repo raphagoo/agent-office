@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { isAgentEffort, isAgentProvider, type AgentChoice, type AgentProvider, type PromptsState } from '../shared/protocol.js';
+import type { ForgeKind } from '../shared/forge.js';
 import { PROMPTS, PROMPT_MAX, fillPrompt, isPromptId, promptText, type PromptId, type PromptVars } from '../shared/prompts.js';
 import { validateWorkerEffort, validateWorkerModel } from './agents.js';
 
@@ -12,8 +13,8 @@ export interface PromptSource {
 }
 
 /** A prompt's text, from `source` when there is one, else the default. */
-export function officePrompt(source: PromptSource | undefined, id: PromptId, vars: PromptVars = {}): string {
-  return fillPrompt(source ? source.text(id) : PROMPTS[id].text, vars);
+export function officePrompt(source: PromptSource | undefined, id: PromptId, vars: PromptVars = {}, forge?: ForgeKind): string {
+  return fillPrompt(source ? source.text(id) : PROMPTS[id].text, vars, forge);
 }
 
 /**
